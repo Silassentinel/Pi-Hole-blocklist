@@ -1,0 +1,59 @@
+# Monthly rebuild of blocklist.txt from CollectionOfBlockingUrls.txt.
+# Changes are proposed as a pull request on the bot branch; nothing is pushed to main.
+name: Update blocklist
+
+on:
+  schedule:
+    - cron: '17 3 1 * *'   # 03:17 UTC on the 1st of each month (04:17/05:17 Belgian time)
+  workflow_dispatch:        # manual run from the Actions tab
+
+permissions: {}             # no token rights by default; the job opts in to what it needs
+
+concurrency:
+  group: update-blocklist
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write        # push the bot branch
+      pull-requests: write   # open/update the PR
+    env:
+      BRANCH: bot/update-blocklist
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: true   # needed for the git push below
+
+      - name: Build blocklist
+        # -I: isolated mode, ignores env vars and the working dir on the import path
+        run: python3 -I scripts/build_blocklist.py --report "$RUNNER_TEMP/report.md"
+
+      - name: Run report
+        if: always()
+        run: cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      - name: Open or update pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ -z "$(git status --porcelain -- blocklist.txt)" ]; then
+            echo "blocklist.txt unchanged; nothing to propose."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898299+github-actions[bot]@users.noreply.github.com'
+          git switch -C "$BRANCH"
+          git add blocklist.txt
+          git commit -m "Monthly blocklist update $(date -u +%Y-%m)"
+          git push --force origin "$BRANCH"   # bot-owned branch, rebuilt from main on every run
+          if gh pr view "$BRANCH" --json state -q .state 2>/dev/null | grep -q OPEN; then
+            gh pr edit "$BRANCH" --body-file "$RUNNER_TEMP/report.md"
+          else
+            gh pr create --base "$BASE" --head "$BRANCH" \
+              --title "Monthly blocklist update $(date -u +%Y-%m)" --body-file "$RUNNER_TEMP/report.md"
+          fi
